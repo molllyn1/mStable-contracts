@@ -4,7 +4,6 @@
 import { Signer } from "ethers"
 import { ethers } from "hardhat"
 import {
-    InvariantValidator__factory,
     MockInvariantValidator__factory,
     AssetProxy__factory,
     MockNexus__factory,
@@ -23,6 +22,7 @@ import {
     MockInitializableToken__factory,
     MockInitializableTokenWithFee__factory,
     Manager,
+    ExposedInvariantValidator__factory,
 } from "types/generated"
 import { BN, minimum, simpleToExactAmount } from "@utils/math"
 import { fullScale, MainnetAccounts, ratioScale, ZERO_ADDRESS, DEAD_ADDRESS } from "@utils/constants"
@@ -55,7 +55,12 @@ export class MassetMachine {
         return this
     }
 
-    public async deployMasset(useMockValidator = false, useLendingMarkets = false, useTransferFees = false): Promise<MassetDetails> {
+    public async deployMasset(
+        useMockValidator = false,
+        useLendingMarkets = false,
+        useTransferFees = false,
+        amplificationCoefficient = simpleToExactAmount(1, 2),
+    ): Promise<MassetDetails> {
         // 1. Bassets
         const bAssets = await this.loadBassetsLocal(useLendingMarkets, useTransferFees)
 
@@ -63,7 +68,7 @@ export class MassetMachine {
         // If mocks enabled, uses mock which returns 1:1 on all actions
         const forgeVal = await (useMockValidator
             ? new MockInvariantValidator__factory(this.sa.default.signer).deploy()
-            : new InvariantValidator__factory(this.sa.default.signer).deploy())
+            : new ExposedInvariantValidator__factory(this.sa.default.signer).deploy())
 
         // 3. Masset
         // 3.1. Dependencies
@@ -106,7 +111,7 @@ export class MassetMachine {
                 status: 0,
             })),
             {
-                a: simpleToExactAmount(1, 2),
+                a: amplificationCoefficient,
                 limits: {
                     min: simpleToExactAmount(5, 16),
                     max: simpleToExactAmount(55, 16),
@@ -405,8 +410,8 @@ export class MassetMachine {
         const mockBasset1 = await this.loadBassetProxy("Ren BTC", "renBTC", 18, recipient)
         const mockBasset2 = await this.loadBassetProxy("Synthetix BTC", "sBTC", 6, recipient)
         const mockBasset3 = await this.loadBassetProxy("Wrapped BTC", "wBTC", 12, recipient, 10000000000, useTransferFees)
-        const mockBasset4 = await this.loadBassetProxy("Binance Wrapped BTC", "bBTC", 18, recipient, 10000000000, useTransferFees)
-        const bAssets = [mockBasset1, mockBasset2, mockBasset3, mockBasset4]
+        // const mockBasset4 = await this.loadBassetProxy("Binance Wrapped BTC", "bBTC", 18, recipient, 10000000000, useTransferFees)
+        const bAssets = [mockBasset1, mockBasset2, mockBasset3] //, mockBasset4]
         // bAssets at index 2 and 3 only have transfer fees if useTransferFees is true
         const bAssetTxFees = bAssets.map((_, i) => useTransferFees && (i === 2 || i === 3))
 
@@ -419,13 +424,13 @@ export class MassetMachine {
         const mockAToken1 = await aTokenFactory.deploy(mockAave.address, mockBasset1.address)
         const mockAToken2 = await aTokenFactory.deploy(mockAave.address, mockBasset2.address)
         const mockAToken3 = await aTokenFactory.deploy(mockAave.address, mockBasset3.address)
-        const mockAToken4 = await aTokenFactory.deploy(mockAave.address, mockBasset4.address)
+        // const mockAToken4 = await aTokenFactory.deploy(mockAave.address, mockBasset4.address)
 
         //  - Add to the Platform
         await mockAave.addAToken(mockAToken1.address, mockBasset1.address)
         await mockAave.addAToken(mockAToken2.address, mockBasset2.address)
         await mockAave.addAToken(mockAToken3.address, mockBasset3.address)
-        await mockAave.addAToken(mockAToken4.address, mockBasset4.address)
+        // await mockAave.addAToken(mockAToken4.address, mockBasset4.address)
 
         return {
             bAssets,
@@ -444,10 +449,10 @@ export class MassetMachine {
                     bAsset: mockBasset3.address,
                     aToken: mockAToken3.address,
                 },
-                {
-                    bAsset: mockBasset4.address,
-                    aToken: mockAToken4.address,
-                },
+                // {
+                //     bAsset: mockBasset4.address,
+                //     aToken: mockAToken4.address,
+                // },
             ],
         }
     }
@@ -590,11 +595,7 @@ export class MassetMachine {
 
         const balances = rawBalances.map((b, i) => b.add(platformBalances[i]))
         // get overweight
-        const currentVaultUnits = bAssets.map((b) =>
-            BN.from(b.vaultBalance)
-                .mul(BN.from(b.ratio))
-                .div(ratioScale),
-        )
+        const currentVaultUnits = bAssets.map((b) => BN.from(b.vaultBalance).mul(BN.from(b.ratio)).div(ratioScale))
         // get total amount
         const sumOfBassets = currentVaultUnits.reduce((p, c) => p.add(c), BN.from(0))
         return {
@@ -673,12 +674,7 @@ export class MassetMachine {
         const totalSupply = await mAsset.totalSupply()
         const surplus = await mAsset.surplus()
         const cacheSize = await mAsset.cacheSize()
-        const maxC = totalSupply
-            .add(surplus)
-            .mul(ratioScale)
-            .div(BN.from(bAsset.ratio))
-            .mul(cacheSize)
-            .div(fullScale)
+        const maxC = totalSupply.add(surplus).mul(ratioScale).div(BN.from(bAsset.ratio)).mul(cacheSize).div(fullScale)
         const newSum = BN.from(integratorBalBefore).add(amount)
         const expectInteraction = type === "deposit" ? newSum.gte(maxC) : amount.gt(BN.from(integratorBalBefore))
         return {
@@ -688,10 +684,7 @@ export class MassetMachine {
                 type === "deposit"
                     ? newSum.sub(maxC.div(2))
                     : minimum(
-                          maxC
-                              .div(2)
-                              .add(amount)
-                              .sub(BN.from(integratorBalBefore)),
+                          maxC.div(2).add(amount).sub(BN.from(integratorBalBefore)),
                           BN.from(bAsset.vaultBalance).sub(BN.from(integratorBalBefore)),
                       ),
             rawBalance:

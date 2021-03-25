@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 /* eslint-disable @typescript-eslint/no-loop-func */
 /* eslint-disable no-restricted-syntax */
 /* eslint-disable @typescript-eslint/no-unused-expressions */
@@ -16,6 +17,7 @@ import {
     MaliciousAaveIntegration__factory,
     MockERC20,
     MockPlatformIntegration__factory,
+    ExposedMasset,
 } from "types/generated"
 import { assertBNSlightlyGTPercent } from "@utils/assertions"
 import { keccak256, toUtf8Bytes } from "ethers/lib/utils"
@@ -38,8 +40,9 @@ describe("Masset Admin", () => {
         useLendingMarkets = false,
         useMockValidator = true,
         weights: number[] = [25, 25, 25, 25],
+        amplificationCoefficient = simpleToExactAmount(1, 2),
     ): Promise<void> => {
-        details = await mAssetMachine.deployMasset(useMockValidator, useLendingMarkets, useTransferFees)
+        details = await mAssetMachine.deployMasset(useMockValidator, useLendingMarkets, useTransferFees, amplificationCoefficient)
         if (seedBasket) {
             await mAssetMachine.seedWithWeightings(details, weights)
         }
@@ -896,6 +899,105 @@ describe("Masset Admin", () => {
                 // increment 2 days
                 await increaseTime(ONE_DAY.mul(2).add(1))
                 await expect(details.mAsset.connect(sa.governor.signer).stopRampA()).to.revertedWith("Amplification not changing")
+            })
+        })
+        context.only("ramped A up from 120 to 400 in 2 days", () => {
+            let startTime: BN
+            let endTime: BN
+            let mAsset: ExposedMasset
+            let kBefore: BN
+            const days = 2
+            before(async () => {
+                await runSetup(true, false, false, false, [92, 47, 61], BN.from(120))
+            })
+            it("should succeed getting A and K just after start", async () => {
+                mAsset = details.mAsset.connect(sa.governor.signer)
+                startTime = await getTimestamp()
+                endTime = startTime.add(ONE_DAY.mul(days))
+                await mAsset.startRampA(400, endTime)
+                expect(await mAsset.getA()).to.eq(12000)
+
+                kBefore = await mAsset.getK()
+                console.log(`K before ramp ${kBefore}`)
+                const { data } = await mAsset.getBassets()
+                expect(data).to.length(3)
+                console.log("bAssets vault balances")
+                data.forEach((d) => console.log(d.vaultBalance.toString()))
+            })
+            // Add swaps
+            it("swap 20 BTC mid ramping", async () => {
+                await increaseTime(ONE_DAY.mul(days / 2))
+                const swapAmount = 40
+
+                const kBeforeSwap = await mAsset.getK()
+                let percentageDiff = kBeforeSwap.sub(kBefore).mul(10000).div(kBefore)
+                console.log(`K before swaps ${kBeforeSwap} ${percentageDiff}bps`)
+
+                const { bAssets } = details
+                const traderMasset = details.mAsset.connect(sa.default.signer)
+                // Approval and swap 2 BTC from 1 -> 2
+                let inputAmount = await mAssetMachine.approveMasset(bAssets[1], traderMasset, swapAmount)
+                await traderMasset.swap(bAssets[1].address, bAssets[2].address, inputAmount, 0, sa.default.address)
+
+                const kMidSwap = await mAsset.getK()
+                percentageDiff = kMidSwap.sub(kBefore).mul(10000).div(kBefore)
+                console.log(`K between swaps ${kMidSwap} ${percentageDiff}bps`)
+
+                // Approval and swap 2 BTC from 2 -> 1
+                inputAmount = await mAssetMachine.approveMasset(bAssets[2], traderMasset, swapAmount)
+                await traderMasset.swap(bAssets[2].address, bAssets[1].address, inputAmount, 0, sa.default.address)
+
+                const kAfterSwap = await mAsset.getK()
+                percentageDiff = kAfterSwap.sub(kBefore).mul(10000).div(kBefore)
+                console.log(`K after swaps ${kAfterSwap} ${percentageDiff}bps`)
+            })
+            it("after ramp", async () => {
+                await increaseTime(ONE_DAY.mul(days / 2))
+                expect(await mAsset.getA()).to.eq(40000)
+                const kAfter = await mAsset.getK()
+                const percentageDiff = kAfter.sub(kBefore).mul(10000).div(kBefore)
+                console.log(`K after ramp ${kAfter} ${percentageDiff}bps`)
+            })
+            it("ramp back down", async () => {
+                expect(await mAsset.getA()).to.eq(40000)
+                endTime = startTime.add(ONE_DAY.mul(days * 2))
+                await mAsset.startRampA(120, endTime)
+                await increaseTime(ONE_DAY.mul(days))
+                expect(await mAsset.getA()).to.eq(12000)
+                const kAfter = await mAsset.getK()
+                const percentageDiff = kAfter.sub(kBefore).mul(10000).div(kBefore)
+                console.log(`K after ramp ${kAfter} ${percentageDiff}bps`)
+            })
+        })
+        context.only("ramped A up from 120 to 400 in 2 weeks", () => {
+            let startTime: BN
+            let endTime: BN
+            let mAsset: ExposedMasset
+            let kBefore: BN
+            const weeks = 2
+            before(async () => {
+                await runSetup(true, false, false, false, [92, 47, 61], BN.from(120))
+            })
+            it("should succeed getting A and K just after start", async () => {
+                mAsset = details.mAsset.connect(sa.governor.signer)
+                startTime = await getTimestamp()
+                endTime = startTime.add(ONE_WEEK.mul(weeks))
+                await mAsset.startRampA(400, endTime)
+                expect(await mAsset.getA()).to.eq(12000)
+
+                kBefore = await mAsset.getK()
+                console.log(`K before ramp ${kBefore}`)
+                const { data } = await mAsset.getBassets()
+                expect(data).to.length(3)
+                console.log("bAssets vault balances")
+                data.forEach((d) => console.log(d.vaultBalance.toString()))
+            })
+            it("after ramp", async () => {
+                await increaseTime(ONE_WEEK.mul(weeks))
+                expect(await mAsset.getA()).to.eq(40000)
+                const kAfter = await mAsset.getK()
+                const percentageDiff = kAfter.sub(kBefore).mul(10000).div(kBefore)
+                console.log(`K after ramp ${kAfter} ${percentageDiff}bps`)
             })
         })
     })
